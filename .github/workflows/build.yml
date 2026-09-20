@@ -1,0 +1,203 @@
+name: Build IPA
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify ChOma symlink
+        run: |
+          CHOMA_INCLUDE="Cofi/XPF/external/ChOma/include/choma"
+          if [ -L "$CHOMA_INCLUDE" ]; then
+            echo "Symlink OK: $(ls -la "$CHOMA_INCLUDE")"
+          elif [ -f "$CHOMA_INCLUDE" ]; then
+            TARGET=$(cat "$CHOMA_INCLUDE")
+            echo "Restoring symlink: $CHOMA_INCLUDE -> $TARGET"
+            rm "$CHOMA_INCLUDE"
+            ln -s "$TARGET" "$CHOMA_INCLUDE"
+          else
+            echo "Creating symlink: $CHOMA_INCLUDE -> ../src"
+            mkdir -p "$(dirname "$CHOMA_INCLUDE")"
+            ln -s ../src "$CHOMA_INCLUDE"
+          fi
+          ls -la "$CHOMA_INCLUDE"
+
+      - name: Select Xcode
+        run: |
+          XCODE_PATH=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
+          if [ -z "$XCODE_PATH" ]; then
+            echo "error: no Xcode found" >&2
+            exit 1
+          fi
+          echo "Using $XCODE_PATH"
+          sudo xcode-select -s "$XCODE_PATH"
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Install ldid
+        run: brew install ldid
+
+      - name: Build (Debug, iphoneos)
+        run: |
+          set -euo pipefail
+          SCHEME="Cofi"
+          CONFIG="Debug"
+          SDK="iphoneos"
+          PROJECT="Cofi.xcodeproj"
+          DERIVED="$PWD/build/DerivedData"
+
+          mkdir -p build
+
+          echo "==> xcodebuild ($SCHEME / $CONFIG / $SDK)"
+          xcodebuild \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -sdk "$SDK" \
+            -configuration "$CONFIG" \
+            -derivedDataPath "$DERIVED" \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Package IPA
+        run: |
+          set -euo pipefail
+          DERIVED="$PWD/build/DerivedData"
+          CONFIG="Debug"
+          SDK="iphoneos"
+          APP_PATH="$DERIVED/Build/Products/${CONFIG}-${SDK}/Cofi.app"
+
+          if [ ! -d "$APP_PATH" ]; then
+            echo "error: $APP_PATH not found" >&2
+            exit 1
+          fi
+
+          # Manually copy the dynamically built libxpf.dylib into the app bundle
+          cp "Cofi/XPF/output/ios/libxpf.dylib" "$APP_PATH/libxpf.dylib"
+
+          VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP_PATH/Info.plist")
+          echo "Version: $VERSION"
+
+          IPA_OUT="$PWD/build/Cofi-${VERSION}.ipa"
+          STAGE=$(mktemp -d)
+          mkdir -p "$STAGE/Payload"
+          cp -R "$APP_PATH" "$STAGE/Payload/"
+          cd "$STAGE" && zip -qry "$IPA_OUT" Payload
+          rm -rf "$STAGE"
+
+          SIZE=$(du -h "$IPA_OUT" | cut -f1)
+          echo "==> IPA: $IPA_OUT ($SIZE)"
+          echo "IPA_PATH=$IPA_OUT" >> "$GITHUB_ENV"
+          echo "IPA_NAME=Cofi-${VERSION}.ipa" >> "$GITHUB_ENV"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.IPA_NAME }}
+          path: ${{ env.IPA_PATH }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: macos-15
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fix symlinks
+        run: |
+          CHOMA_INCLUDE="Cofi/XPF/external/ChOma/include/choma"
+          if [ -L "$CHOMA_INCLUDE" ]; then
+            echo "Symlink OK"
+          elif [ -f "$CHOMA_INCLUDE" ]; then
+            TARGET=$(cat "$CHOMA_INCLUDE")
+            rm "$CHOMA_INCLUDE"
+            ln -s "$TARGET" "$CHOMA_INCLUDE"
+          else
+            mkdir -p "$(dirname "$CHOMA_INCLUDE")"
+            ln -s ../src "$CHOMA_INCLUDE"
+          fi
+
+      - name: Select Xcode
+        run: |
+          XCODE_PATH=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
+          sudo xcode-select -s "$XCODE_PATH"
+
+      - name: Install ldid
+        run: brew install ldid
+
+      - name: Build (Debug, iphoneos)
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          xcodebuild \
+            -project Cofi.xcodeproj \
+            -scheme Cofi \
+            -sdk iphoneos \
+            -configuration Debug \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Package IPA
+        run: |
+          set -euo pipefail
+          APP_PATH="$PWD/build/DerivedData/Build/Products/Debug-iphoneos/Cofi.app"
+          
+          # Manually copy the dynamically built libxpf.dylib into the app bundle
+          # because Xcode's CopyFiles phase might miss it during CI builds
+          cp "Cofi/XPF/output/ios/libxpf.dylib" "$APP_PATH/libxpf.dylib"
+          
+          VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP_PATH/Info.plist")
+          IPA_OUT="$PWD/build/Cofi-${VERSION}.ipa"
+          STAGE=$(mktemp -d)
+          mkdir -p "$STAGE/Payload"
+          cp -R "$APP_PATH" "$STAGE/Payload/"
+          cd "$STAGE" && zip -qry "$IPA_OUT" Payload
+          rm -rf "$STAGE"
+          echo "IPA_PATH=$IPA_OUT" >> "$GITHUB_ENV"
+          echo "IPA_NAME=Cofi-${VERSION}.ipa" >> "$GITHUB_ENV"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.VERSION }}
+          name: DSWUnity v${{ env.VERSION }}
+          body: |
+            ## DSWUnity v${{ env.VERSION }}
+
+            ### Contact / Support
+            Telegram: https://t.me/wtuananh6868
+
+            ### Build Info
+            - **Product:** DSWUnity
+            - **Scheme:** Cofi
+            - **Configuration:** Debug
+            - **SDK:** iphoneos
+            - **Code Signing:** Disabled (unsigned IPA)
+
+            ### Installation
+            Install the IPA via **AltStore**, **TrollStore**, or **Sideloadly**.
+
+            ### Compatibility
+            - iOS/iPadOS 17.0 – 18.7.1
+            - iOS/iPadOS 26.0 – 26.0.1
+            - arm64 / arm64e (A12–A18, M1–M4)
+          files: ${{ env.IPA_PATH }}
+          generate_release_notes: true
