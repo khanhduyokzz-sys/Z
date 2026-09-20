@@ -1,0 +1,74 @@
+name: Unzip darksword.zip
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    paths:
+      - "ds.zip"
+      - "DarkSword.zip"
+      - ".github/workflows/unzip.yml"
+  pull_request:
+    branches: [main, master]
+    paths:
+      - "ds.zip"
+      - "DarkSword.zip"
+      - ".github/workflows/unzip.yml"
+
+permissions:
+  contents: write  # Cần quyền write để push lên repo
+
+jobs:
+  unzip:
+    name: Giai nen darksword.zip -> Push to repo
+    runs-on: macos-15
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Lấy full history để push
+
+      - name: Locate darksword.zip
+        id: zip
+        run: |
+          set -e
+          ZIP="ds.zip"
+          if [ ! -f "$ZIP" ]; then
+            ZIP=$(find . -maxdepth 2 -iname "darksword.zip" -not -path "./.git/*" | head -n 1)
+          fi
+          if [ -z "$ZIP" ]; then
+            echo "::error::Khong tim thay darksword.zip o goc repo."
+            exit 1
+          fi
+          echo "Da tim thay: $ZIP"
+          ls -lh "$ZIP"
+          echo "zip_path=$ZIP" >> "$GITHUB_OUTPUT"
+
+      - name: Unzip darksword.zip to repo
+        run: |
+          set -e
+          # Giải nén trực tiếp vào root của repo
+          unzip -oq "${{ steps.zip.outputs.zip_path }}" -d .
+          
+          echo "===== Cau truc thu muc sau khi giai nen ====="
+          find . -maxdepth 2 -type d -not -path "./.git/*" | sort
+
+      - name: Commit extracted files to repository
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Thêm tất cả file đã giải nén
+          git add -A
+          
+          # Kiểm tra có thay đổi không
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Extract source code from darksword.zip"
+            git push
+            echo "Pushed extracted source to repository"
+          fi
