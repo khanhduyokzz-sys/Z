@@ -1,0 +1,16 @@
+# Build output
+build/
+DerivedData/
+
+# Xcode user data
+*.xcuserdata/
+*.xcuserstate
+xcuserdata/
+
+# macOS
+.DS_Store
+*.swp
+*~
+
+# GitHub token
+github.md
