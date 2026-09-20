@@ -1,4 +1,4 @@
-name: Unzip darksword.zip
+name: Unzip darksword.zip & Build
 
 on:
   workflow_dispatch:
@@ -19,10 +19,10 @@ permissions:
   contents: write  # Cần quyền write để push lên repo
 
 jobs:
-  unzip:
-    name: Giai nen darksword.zip -> Push to repo
+  unzip-build:
+    name: Giai nen darksword.zip -> Push to repo -> Build unsigned IPA
     runs-on: macos-15
-    timeout-minutes: 20
+    timeout-minutes: 40
 
     steps:
       - name: Checkout
@@ -54,6 +54,13 @@ jobs:
           
           echo "===== Cau truc thu muc sau khi giai nen ====="
           find . -maxdepth 2 -type d -not -path "./.git/*" | sort
+          
+          PROJ_COUNT=$(find . -type d -name "*.xcodeproj" -not -path "./.git/*" | wc -l | tr -d ' ')
+          if [ "$PROJ_COUNT" -eq 0 ]; then
+            echo "::error::Trong darksword.zip khong co .xcodeproj"
+            exit 1
+          fi
+          echo "Tim thay $PROJ_COUNT .xcodeproj."
 
       - name: Commit extracted files to repository
         run: |
@@ -72,3 +79,55 @@ jobs:
             git push
             echo "Pushed extracted source to repository"
           fi
+
+      - name: Select latest Xcode
+        run: |
+          set -e
+          XCODE_APP=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
+          echo "Using $XCODE_APP"
+          sudo xcode-select -s "$XCODE_APP/Contents/Developer"
+          xcodebuild -version
+
+      - name: Locate Xcode project & scheme
+        id: proj
+        run: |
+          set -e
+          PROJ=$(find . -type d -name "*.xcodeproj" -not -path "./.git/*" | head -n 1)
+          echo "Project: $PROJ"
+          xcodebuild -list -project "$PROJ"
+          echo "proj_path=$PROJ" >> "$GITHUB_OUTPUT"
+
+      - name: Build (Release, unsigned, device)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project "${{ steps.proj.outputs.proj_path }}" \
+            -scheme DarkSword \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            | tee build.log | grep -E "(=== BUILD|error:|BUILD (SUCCEEDED|FAILED))" || true
+          test -d "build/Build/Products/Release-iphoneos/DarkSword.app"
+
+      - name: Package unsigned IPA
+        run: |
+          set -e
+          mkdir -p Payload
+          cp -R "build/Build/Products/Release-iphoneos/DarkSword.app" "Payload/DarkSword.app"
+          zip -qry "DarkSword-${GITHUB_REF_NAME}-from-zip-unsigned.ipa" Payload
+          rm -rf Payload
+          ls -lh *.ipa
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DarkSword-from-zip-unsigned-ipa
+          path: |
+            *.ipa
+            build.log
+          if-no-files-found: error
+          retention-days: 14
